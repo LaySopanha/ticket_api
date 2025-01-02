@@ -56,19 +56,59 @@ class Ticket(BaseModel):
     @field_validator("issue_date", mode="before")
     def parse_issue_date(cls, value):
         """Convert 'DD-MM-YYYY' to datetime.date."""
+        if value is None or isinstance(value, date):
+            return value
         if isinstance(value, str):
             try:
                 return datetime.strptime(value, "%d-%b-%Y").date()
             except ValueError:
                 raise ValueError("Invalid date format. Expected format: DD-MMM-YYYY.")
         return value
+    
+class TicketSearchResult(BaseModel):
+    ticket_code: str
+    ticket_number: str
+    type: Optional[str] = None
+    document_status_code: Optional[str] = None
+    owner_pcc: Optional[str] = None
+    owner_agent: Optional[str] = None
+    agent_issue_pcc: Optional[str] = None
+    agent_issue_name: Optional[str] = None
+    class_: Optional[str] = None
+    pax_name: Optional[str] = None
+    itinerary: Optional[str] = None
+    ticket_exchange_info: Optional[str] = None
+    indicator: Optional[str] = None
+    group_name: Optional[str] = None
+    issue_date: Optional[date] = None
+    currency: Optional[str] = None
+    fare: Optional[float] = None
+    net_fare: Optional[float] = None
+    taxes: Optional[float] = None
+    total_fare: Optional[float] = None
+    comm: Optional[float] = None
+    cancellation_fee: Optional[float] = None
+    payable: Optional[float] = None
+    amount_used: Optional[float] = None
+    booking_date: Optional[date] = None
+    booking_signon: Optional[str] = None
+    pnr_code: Optional[str] = None
+    tour_code: Optional[str] = None
+    claim_amount: Optional[float] = None
+    date_of_payment: Optional[date] = None
+    form_of_payment: Optional[str] = None
+    place_of_payment: Optional[str] = None
+    remark: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    sold_price: Optional[float] = None
 #database connection 
 
 async def get_db_connection():
     return await asyncpg.connect(DATABASE_URL)
 
 #API endpoints
-@app.get("/tickets", response_model=List[Ticket])
+@app.get("/tickets", response_model=List[Ticket], summary="Retrieve all tickets", description="Fetch all tickets from the database.")
 async def get_tickets():
     """Fetch all tickets."""
     try:
@@ -96,8 +136,24 @@ async def create_ticket(ticket: Ticket):
         await conn.close()
         raise HTTPException(status_code=400, detail=str(e))
     
+# A search functionality to search for tickets by multiple fields param
+@app.get("/tickets/search", response_model=List[TicketSearchResult], summary= "search tickets", description="Search for tickets by ticket number or pax name.")
+async def search_tickets(ticket_number: Optional[str]=None, pax_name: Optional[str]=None):
+    conn = await get_db_connection()
+    query = "SELECT * FROM tickets WHERE 1=1"
+    params = []
+    if ticket_number:
+        query += " AND ticket_number = $1"
+        params.append(ticket_number)
+    if pax_name:
+        query += " AND pax_name ILIKE $2"
+        params.append(f"%{pax_name}%")
+    rows = await conn.fetch(query, *params)
+    await conn.close()
+    return [TicketSearchResult(**dict(row)) for row in rows]
+
 # Fetch tickets by date through the use of issue date 
-@app.get("/tickets/{date}", response_model=List[Ticket])
+@app.get("/tickets/{date}", response_model=List[Ticket], summary="Retrieve tickets by date", description="Fetch tickets by issue date.")
 async def get_tickets_by_date(date: str):
     """Fetch tickets by date."""
     try:
@@ -114,8 +170,9 @@ async def get_tickets_by_date(date: str):
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
+
 # delete ticket by ticket_id 
-@app.delete("/tickets/{ticket_number}")
+@app.delete("/tickets/{ticket_number}",summary="Delete a ticket", description="Delete a ticket by ticket number.")
 async def delete_ticket(ticket_number: str):
     """Delete a ticket."""
     conn = await get_db_connection()
