@@ -137,8 +137,8 @@ async def create_ticket(ticket: Ticket):
         raise HTTPException(status_code=400, detail=str(e))
     
 # A search functionality to search for tickets by multiple fields param
-@app.get("/tickets/search", response_model=List[TicketSearchResult], summary= "search tickets", description="Search for tickets by ticket number or pax name.")
-async def search_tickets(ticket_number: Optional[str]=None, pax_name: Optional[str]=None):
+@app.get("/tickets/search", response_model=List[TicketSearchResult], summary= "search tickets", description="Search for tickets by ticket number or pax name or agent issue pcc.")
+async def search_tickets(ticket_number: Optional[str]=None, pax_name: Optional[str]=None, agent_issue_pcc: Optional[str] = None):
     conn = await get_db_connection()
     query = "SELECT * FROM tickets WHERE 1=1"
     params = []
@@ -148,6 +148,10 @@ async def search_tickets(ticket_number: Optional[str]=None, pax_name: Optional[s
     if pax_name:
         query += " AND pax_name ILIKE $2"
         params.append(f"%{pax_name}%")
+    if agent_issue_pcc:
+        query += " AND agent_issue_pcc = $3"
+        params.append(agent_issue_pcc)
+        
     rows = await conn.fetch(query, *params)
     await conn.close()
     return [TicketSearchResult(**dict(row)) for row in rows]
