@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
 from typing import List
 from typing import Optional
 from datetime import date, datetime
@@ -11,8 +12,27 @@ import os
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-#initialize the FastAPI app
-app = FastAPI()
+#App lifespan
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    #init connection pool
+    app.state.pool = await asyncpg.create_pool(DATABASE_URL)
+    yield # app run during this period
+    await app.state.pool.close() # app close
+    
+#initialize the FastAPI app with the lifespan
+app = FastAPI(lifespan=lifespan)
+
+#dependency to get a database connection
+async def get_db_connection():
+    try:
+        # check if the pool is init
+        if not app.state.pool:
+            app.state.pool = await asyncpg.create_pool(DATABASE_URL)
+        return app.state.pool
+    except Exception as e:
+        # log for error
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 #pydantic model for ticket
 class Ticket(BaseModel):
@@ -102,19 +122,15 @@ class TicketSearchResult(BaseModel):
     phone: Optional[str] = None
     email: Optional[str] = None
     sold_price: Optional[float] = None
-#database connection 
-
-async def get_db_connection():
-    return await asyncpg.connect(DATABASE_URL)
 
 #API endpoints
 @app.get("/tickets", response_model=List[Ticket], summary="Retrieve all tickets", description="Fetch all tickets from the database.")
 async def get_tickets():
     """Fetch all tickets."""
     try:
-        conn = await get_db_connection()
-        rows = await conn.fetch("SELECT * FROM tickets")
-        await conn.close()
+        pool = await get_db_connection()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM tickets")
         return [Ticket(**dict(row)) for row in rows]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
@@ -123,37 +139,35 @@ async def get_tickets():
 @app.post("/tickets", response_model=Ticket)
 async def create_ticket(ticket: Ticket):
     """Insert a new ticket."""
-    conn = await get_db_connection()
     try:
-
-        await conn.execute(
-            "INSERT INTO tickets (ticket_code, ticket_number, type, document_status_code, owner_pcc, owner_agent, agent_issue_pcc, agent_issue_name, class_, pax_name, itinerary, ticket_exchange_info, indicator, group_name, issue_date, currency, fare, net_fare, taxes, total_fare, comm, cancellation_fee, payable, amount_used, booking_date, booking_signon, pnr_code, tour_code, claim_amount, date_of_payment, form_of_payment, place_of_payment, remark, phone, email, sold_price) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36) RETURNING *",
-            ticket.ticket_code,ticket.ticket_number, ticket.type, ticket.document_status_code, ticket.owner_pcc, ticket.owner_agent, ticket.agent_issue_pcc, ticket.agent_issue_name, ticket.class_, ticket.pax_name, ticket.itinerary, ticket.ticket_exchange_info, ticket.indicator, ticket.group_name, ticket.issue_date, ticket.currency, ticket.fare, ticket.net_fare, ticket.taxes, ticket.total_fare, ticket.comm, ticket.cancellation_fee, ticket.payable, ticket.amount_used, ticket.booking_date, ticket.booking_signon, ticket.pnr_code, ticket.tour_code, ticket.claim_amount, ticket.date_of_payment, ticket.form_of_payment, ticket.place_of_payment, ticket.remark, ticket.phone, ticket.email, ticket.sold_price
-        )
-        await conn.close()
+        pool = await get_db_connection()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO tickets (ticket_code, ticket_number, type, document_status_code, owner_pcc, owner_agent, agent_issue_pcc, agent_issue_name, class_, pax_name, itinerary, ticket_exchange_info, indicator, group_name, issue_date, currency, fare, net_fare, taxes, total_fare, comm, cancellation_fee, payable, amount_used, booking_date, booking_signon, pnr_code, tour_code, claim_amount, date_of_payment, form_of_payment, place_of_payment, remark, phone, email, sold_price) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36) RETURNING *",
+                ticket.ticket_code,ticket.ticket_number, ticket.type, ticket.document_status_code, ticket.owner_pcc, ticket.owner_agent, ticket.agent_issue_pcc, ticket.agent_issue_name, ticket.class_, ticket.pax_name, ticket.itinerary, ticket.ticket_exchange_info, ticket.indicator, ticket.group_name, ticket.issue_date, ticket.currency, ticket.fare, ticket.net_fare, ticket.taxes, ticket.total_fare, ticket.comm, ticket.cancellation_fee, ticket.payable, ticket.amount_used, ticket.booking_date, ticket.booking_signon, ticket.pnr_code, ticket.tour_code, ticket.claim_amount, ticket.date_of_payment, ticket.form_of_payment, ticket.place_of_payment, ticket.remark, ticket.phone, ticket.email, ticket.sold_price
+            )
         return ticket
     except Exception as e:
-        await conn.close()
         raise HTTPException(status_code=400, detail=str(e))
     
 # A search functionality to search for tickets by multiple fields param
 @app.get("/tickets/search", response_model=List[TicketSearchResult], summary= "search tickets", description="Search for tickets by ticket number or pax name or agent issue pcc.")
 async def search_tickets(ticket_number: Optional[str]=None, pax_name: Optional[str]=None, agent_issue_pcc: Optional[str] = None):
-    conn = await get_db_connection()
-    query = "SELECT * FROM tickets WHERE 1=1"
-    params = []
-    if ticket_number:
-        query += " AND ticket_number = $1"
-        params.append(ticket_number)
-    if pax_name:
-        query += " AND pax_name ILIKE $2"
-        params.append(f"%{pax_name}%")
-    if agent_issue_pcc:
-        query += " AND agent_issue_pcc = $3"
-        params.append(agent_issue_pcc)
-        
-    rows = await conn.fetch(query, *params)
-    await conn.close()
+    pool = await get_db_connection()
+    async with pool.acquire() as conn:
+        query = "SELECT * FROM tickets WHERE 1=1"
+        params = []
+        if ticket_number:
+            query += " AND ticket_number = $1"
+            params.append(ticket_number)
+        if pax_name:
+            query += f" AND pax_name ILIKE ${len(params) + 1}"
+            params.append(f"%{pax_name}%")
+        if agent_issue_pcc:
+            query += f" AND agent_issue_pcc = ${len(params) + 1}"
+            params.append(agent_issue_pcc)   
+             
+        rows = await conn.fetch(query, *params)
     return [TicketSearchResult(**dict(row)) for row in rows]
 
 # Fetch tickets by date through the use of issue date 
@@ -164,9 +178,9 @@ async def get_tickets_by_date(date: str):
         # convert date string to proper format
         parsed_date = datetime.strptime(date, "%Y-%m-%d").date()
         
-        conn = await get_db_connection()
-        rows = await conn.fetch("SELECT * FROM tickets WHERE issue_date = $1", parsed_date)
-        await conn.close()
+        pool = await get_db_connection()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM tickets WHERE issue_date = $1", parsed_date)
         return [Ticket(**dict(row)) for row in rows]
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use DD-MM-YYYY")
@@ -179,9 +193,9 @@ async def get_tickets_by_date(date: str):
 @app.delete("/tickets/{ticket_number}",summary="Delete a ticket", description="Delete a ticket by ticket number.")
 async def delete_ticket(ticket_number: str):
     """Delete a ticket."""
-    conn = await get_db_connection()
-    result = await conn.execute("DELETE FROM tickets WHERE ticket_number = $1", ticket_number)
-    await conn.close()
+    pool = await get_db_connection()
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM tickets WHERE ticket_number = $1", ticket_number)
     if result == "DELETE 0":
         raise HTTPException(status_code=404, detail="Ticket not found")
     return {"message": "Ticket deleted successfully"}
