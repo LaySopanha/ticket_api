@@ -5,12 +5,17 @@ from typing import Optional
 from datetime import date, datetime
 from pydantic import BaseModel, Field, field_validator
 import asyncpg
+import logging
 from dotenv import load_dotenv
 import os
 
 # Load the enviroment vaiables
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# logging
+logger = logging.getLogger("uvicorn")
+logger.setLevel(logging.INFO)
 
 #App lifespan
 @asynccontextmanager
@@ -28,11 +33,17 @@ async def get_db_connection():
     try:
         # check if the pool is init
         if not app.state.pool:
-            app.state.pool = await asyncpg.create_pool(DATABASE_URL)
+            app.state.pool = await asyncpg.create_pool(
+                DATABASE_URL,
+                min_size=5,
+                max_size=20,
+                timeout=60.0,
+                )
         return app.state.pool
     except Exception as e:
         # log for error
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        logger.error(f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error.")
 
 #pydantic model for ticket
 class Ticket(BaseModel):
@@ -124,6 +135,19 @@ class TicketSearchResult(BaseModel):
     sold_price: Optional[float] = None
 
 #API endpoints
+#Health check 
+@app.get("/health", summary="Health check", description="Check the health status of the API.")
+async def health_check():
+    try:
+        pool = await get_db_connection()
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Service Unavailable.")
+
+# get all ticket endpoint 
 @app.get("/tickets", response_model=List[Ticket], summary="Retrieve all tickets", description="Fetch all tickets from the database.")
 async def get_tickets():
     """Fetch all tickets."""
@@ -133,9 +157,10 @@ async def get_tickets():
             rows = await conn.fetch("SELECT * FROM tickets")
         return [Ticket(**dict(row)) for row in rows]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        logger.error(f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error.")
 
-
+#insert ticket endpoint
 @app.post("/tickets", response_model=Ticket)
 async def create_ticket(ticket: Ticket):
     """Insert a new ticket."""
@@ -148,7 +173,8 @@ async def create_ticket(ticket: Ticket):
             )
         return ticket
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error(f"Databse error: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid data provided.")
     
 # A search functionality to search for tickets by multiple fields param
 @app.get("/tickets/search", response_model=List[TicketSearchResult], summary= "search tickets", description="Search for tickets by ticket number or pax name or agent issue pcc.")
@@ -183,9 +209,11 @@ async def get_tickets_by_date(date: str):
             rows = await conn.fetch("SELECT * FROM tickets WHERE issue_date = $1", parsed_date)
         return [Ticket(**dict(row)) for row in rows]
     except ValueError:
+        logger.error(f"Invalid date format. Use YYYY-MM-DD")
         raise HTTPException(status_code=400, detail="Invalid date format. Use DD-MM-YYYY")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        logger.error(f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error.")
 
 
 
@@ -197,5 +225,6 @@ async def delete_ticket(ticket_number: str):
     async with pool.acquire() as conn:
         result = await conn.execute("DELETE FROM tickets WHERE ticket_number = $1", ticket_number)
     if result == "DELETE 0":
+        logger.error(f"Ticket not found: {ticket_number}")
         raise HTTPException(status_code=404, detail="Ticket not found")
-    return {"message": "Ticket deleted successfully"}
+    return {"message": "Ticket deleted successfully."}
