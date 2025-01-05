@@ -4,10 +4,19 @@ from typing import List
 from typing import Optional
 from datetime import date, datetime
 from pydantic import BaseModel, Field, field_validator
+from fastapi.security import APIKeyHeader
+from fastapi import Security, Depends
 import asyncpg
 import logging
 from dotenv import load_dotenv
 import os
+from fastapi.responses import JSONResponse
+
+API_KEY_HEADER = APIKeyHeader(name="X-API-Key")
+async def verify_api_key(api_key: str = Security(API_KEY_HEADER)):
+    if api_key != os.getenv("API_KEY"):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return api_key
 
 # Load the enviroment vaiables
 load_dotenv()
@@ -17,14 +26,23 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 logger = logging.getLogger("uvicorn")
 logger.setLevel(logging.INFO)
 
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger("ticket-api")
+
 #App lifespan
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    #init connection pool
-    app.state.pool = await asyncpg.create_pool(DATABASE_URL)
-    yield # app run during this period
-    await app.state.pool.close() # app close
-    
+    try:
+        #init connection pool
+        app.state.pool = await asyncpg.create_pool(DATABASE_URL)
+        yield # app run during this period
+    finally:
+        if app.state.pool:
+            await app.state.pool.close() # app close    
+      
 #initialize the FastAPI app with the lifespan
 app = FastAPI(lifespan=lifespan)
 
@@ -40,6 +58,10 @@ async def get_db_connection():
                 timeout=60.0,
                 )
         return app.state.pool
+    except asyncpg.PoolTimeoutError:
+        # log for error
+        logger.error("Database connection timeout.")
+        raise HTTPException(status_code=500, detail="Database connection timeout.")
     except Exception as e:
         # log for error
         logger.error(f"Database error: {str(e)}")
@@ -93,7 +115,7 @@ class Ticket(BaseModel):
             try:
                 return datetime.strptime(value, "%d-%b-%Y").date()
             except ValueError:
-                raise ValueError("Invalid date format. Expected format: DD-MMM-YYYY.")
+                raise ValueError("Invalid date format. Expected format: YYYY-MM-DD.")
         return value
     
 class TicketSearchResult(BaseModel):
@@ -148,20 +170,20 @@ async def health_check():
         raise HTTPException(status_code=500, detail="Service Unavailable.")
 
 # get all ticket endpoint 
-@app.get("/tickets", response_model=List[Ticket], summary="Retrieve all tickets", description="Fetch all tickets from the database.")
-async def get_tickets():
+@app.get("/tickets",dependencies=[Depends(verify_api_key)], response_model=List[Ticket], summary="Retrieve all tickets", description="Fetch all tickets from the database with pagination.")
+async def get_tickets(limit: int = 100, offset: int = 0):
     """Fetch all tickets."""
     try:
         pool = await get_db_connection()
         async with pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM tickets")
+            rows = await conn.fetch("SELECT * FROM tickets LIMIT $1 OFFSET $2", limit, offset)
         return [Ticket(**dict(row)) for row in rows]
     except Exception as e:
         logger.error(f"Database error: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error.")
 
 #insert ticket endpoint
-@app.post("/tickets", response_model=Ticket)
+@app.post("/tickets",dependencies=[Depends(verify_api_key)], response_model=Ticket)
 async def create_ticket(ticket: Ticket):
     """Insert a new ticket."""
     try:
@@ -171,14 +193,18 @@ async def create_ticket(ticket: Ticket):
                 "INSERT INTO tickets (ticket_code, ticket_number, type, document_status_code, owner_pcc, owner_agent, agent_issue_pcc, agent_issue_name, class_, pax_name, itinerary, ticket_exchange_info, indicator, group_name, issue_date, currency, fare, net_fare, taxes, total_fare, comm, cancellation_fee, payable, amount_used, booking_date, booking_signon, pnr_code, tour_code, claim_amount, date_of_payment, form_of_payment, place_of_payment, remark, phone, email, sold_price) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36) RETURNING *",
                 ticket.ticket_code,ticket.ticket_number, ticket.type, ticket.document_status_code, ticket.owner_pcc, ticket.owner_agent, ticket.agent_issue_pcc, ticket.agent_issue_name, ticket.class_, ticket.pax_name, ticket.itinerary, ticket.ticket_exchange_info, ticket.indicator, ticket.group_name, ticket.issue_date, ticket.currency, ticket.fare, ticket.net_fare, ticket.taxes, ticket.total_fare, ticket.comm, ticket.cancellation_fee, ticket.payable, ticket.amount_used, ticket.booking_date, ticket.booking_signon, ticket.pnr_code, ticket.tour_code, ticket.claim_amount, ticket.date_of_payment, ticket.form_of_payment, ticket.place_of_payment, ticket.remark, ticket.phone, ticket.email, ticket.sold_price
             )
+        logger.info(f"Ticket created: {ticket.ticket_number}")
         return ticket
     except Exception as e:
-        logger.error(f"Databse error: {str(e)}")
+        logger.error(f"Failed to create ticket: {str(e)}")
         raise HTTPException(status_code=400, detail="Invalid data provided.")
     
 # A search functionality to search for tickets by multiple fields param
-@app.get("/tickets/search", response_model=List[TicketSearchResult], summary= "search tickets", description="Search for tickets by ticket number or pax name or agent issue pcc.")
+@app.get("/tickets/search",dependencies=[Depends(verify_api_key)], response_model=List[TicketSearchResult], summary= "search tickets", description="Search for tickets by ticket number or pax name or agent issue pcc.")
 async def search_tickets(ticket_number: Optional[str]=None, pax_name: Optional[str]=None, agent_issue_pcc: Optional[str] = None):
+    if not any([ticket_number, pax_name, agent_issue_pcc]):
+        logger.error("At least one search parameter is required.")  
+        raise HTTPException(status_code=400, detail="At least one search parameter is required.")
     pool = await get_db_connection()
     async with pool.acquire() as conn:
         query = "SELECT * FROM tickets WHERE 1=1"
@@ -197,7 +223,7 @@ async def search_tickets(ticket_number: Optional[str]=None, pax_name: Optional[s
     return [TicketSearchResult(**dict(row)) for row in rows]
 
 # Fetch tickets by date through the use of issue date 
-@app.get("/tickets/{date}", response_model=List[Ticket], summary="Retrieve tickets by date", description="Fetch tickets by issue date.")
+@app.get("/tickets/{date}",dependencies=[Depends(verify_api_key)], response_model=List[Ticket], summary="Retrieve tickets by date", description="Fetch tickets by issue date.")
 async def get_tickets_by_date(date: str):
     """Fetch tickets by date."""
     try:
@@ -218,7 +244,7 @@ async def get_tickets_by_date(date: str):
 
 
 # delete ticket by ticket_id 
-@app.delete("/tickets/{ticket_number}",summary="Delete a ticket", description="Delete a ticket by ticket number.")
+@app.delete("/tickets/{ticket_number}",dependencies=[Depends(verify_api_key)], summary="Delete a ticket", description="Delete a ticket by ticket number.")
 async def delete_ticket(ticket_number: str):
     """Delete a ticket."""
     pool = await get_db_connection()
@@ -227,4 +253,13 @@ async def delete_ticket(ticket_number: str):
     if result == "DELETE 0":
         logger.error(f"Ticket not found: {ticket_number}")
         raise HTTPException(status_code=404, detail="Ticket not found")
+    logger.info(f"Ticket deleted: {ticket_number}")
     return {"message": "Ticket deleted successfully."}
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    logger.error(f"Unhandled error: {str(exc)}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"}
+    )
