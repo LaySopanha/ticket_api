@@ -3,10 +3,11 @@ version: '3.8'
 services:
   api:
     build: .
+    image: citdeveloper/cit:latest
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - DATABASE_URL=${DATABASE_URL}
       - API_KEY=${API_KEY}
       - ENVIRONMENT=production
     depends_on:
@@ -47,4 +48,4 @@ networks:
     driver: bridge
 
 volumes:
-  postgres_data: 
+  postgres_data:

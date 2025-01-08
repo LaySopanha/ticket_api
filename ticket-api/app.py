@@ -1,21 +1,23 @@
-from fastapi import FastAPI, HTTPException,Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from typing import List
-from typing import Optional
+from typing import List, Optional
 from datetime import date, datetime
 import time
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings
 from fastapi.security import APIKeyHeader
-from fastapi import Security, Depends
-from fastapi import Query
-# import subprocess
+from fastapi import Security, Depends, Query
 import asyncpg
 import logging
 from fastapi.responses import JSONResponse
 import uuid
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv()
 
 class Settings(BaseSettings):
     DATABASE_URL: str
@@ -64,8 +66,11 @@ async def lifespan(app: FastAPI):
         #init connection pool
         app.state.pool = await asyncpg.create_pool(settings.DATABASE_URL)
         yield # app run during this period
+    except Exception as e:
+        logger.error(f"Failed to connect to the database: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to connect to the database")
     finally:
-        if app.state.pool:
+        if hasattr(app.state, "pool") and app.state.pool:
             await app.state.pool.close() # app close    
       
 #initialize the FastAPI app with the lifespan
@@ -143,7 +148,7 @@ class Ticket(BaseModel):
 
     @field_validator("issue_date", mode="before")
     def parse_issue_date(cls, value):
-        """Convert 'DD-MM-YYYY' to datetime.date."""
+        """Convert 'DD-MM-YYYY' to datetime.date.""" 
         if value is None or isinstance(value, date):
             return value
         if isinstance(value, str):
@@ -197,7 +202,7 @@ class TicketSearchResult(BaseModel):
 @app.middleware("http")
 #add request logging middleware
 async def log_requests(request: Request, call_next):
-    """Log all incoming requests."""
+    """Log all incoming requests.""" 
     start_time = time.time()
     response = await call_next(request)
     duration = time.time() - start_time
@@ -243,7 +248,7 @@ async def health_check():
         raise HTTPException(status_code=503, detail="Service Unavailable.")
     
 # def get_version_info():
-#     """Get automatic version and update information."""
+#     """Get automatic version and update information.""" 
 #     try:
 #         # Get version from git tag
 #         version = subprocess.check_output(
@@ -329,9 +334,9 @@ async def get_tickets(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 #insert ticket endpoint
-@app.post("/tickets",dependencies=[Depends(verify_api_key)], response_model=Ticket)
+@app.post("/tickets",dependencies=[Depends(verify_api_key)], response_model=Ticket, summary="Create a ticket", description="Insert a new ticket into the database.")
 async def create_ticket(ticket: Ticket):
-    """Insert a new ticket."""
+    """Insert a new ticket.""" 
     try:
         pool = await get_db_connection()
         async with pool.acquire() as conn:
@@ -519,7 +524,7 @@ async def search_tickets(ticket_number: Optional[str]=None, pax_name: Optional[s
 # Fetch tickets by date through the use of issue date 
 @app.get("/tickets/{date}",dependencies=[Depends(verify_api_key)], response_model=List[Ticket], summary="Retrieve tickets by date", description="Fetch tickets by issue date.")
 async def get_tickets_by_date(date: str):
-    """Fetch tickets by date."""
+    """Fetch tickets by date.""" 
     try:
         # convert date string to proper format
         parsed_date = datetime.strptime(date, "%Y-%m-%d").date()
@@ -540,7 +545,7 @@ async def get_tickets_by_date(date: str):
 # delete ticket by ticket_id 
 @app.delete("/tickets/{ticket_number}",dependencies=[Depends(verify_api_key)], summary="Delete a ticket", description="Delete a ticket by ticket number.")
 async def delete_ticket(ticket_number: str):
-    """Delete a ticket."""
+    """Delete a ticket.""" 
     pool = await get_db_connection()
     async with pool.acquire() as conn:
         result = await conn.execute("DELETE FROM tickets WHERE ticket_number = $1", ticket_number)
